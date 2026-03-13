@@ -1,0 +1,78 @@
+name: Deploy ADF to Production
+
+on:
+  push:
+    branches:
+      - adf_publish
+
+env:
+  RESOURCE_GROUP: ${{ vars.PROD_RESOURCE_GROUP }}
+  FACTORY_NAME: ${{ vars.PROD_ADF_NAME }}
+
+jobs:
+  deploy-to-production:
+    runs-on: ubuntu-latest
+    environment: production  # Optional: adds approval gate
+    
+    steps:
+      - name: Checkout adf_publish branch
+        uses: actions/checkout@v4
+        with:
+          ref: adf_publish
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Stop All ADF Triggers
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            triggers=$(az datafactory trigger list \
+              --factory-name ${{ env.FACTORY_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --query "[?properties.runtimeState=='Started'].name" -o tsv)
+            
+            for trigger in $triggers; do
+              echo "Stopping trigger: $trigger"
+              az datafactory trigger stop \
+                --factory-name ${{ env.FACTORY_NAME }} \
+                --resource-group ${{ env.RESOURCE_GROUP }} \
+                --name $trigger
+            done
+        continue-on-error: true
+
+      - name: Deploy ADF ARM Template
+        uses: azure/arm-deploy@v2
+        with:
+          resourceGroupName: ${{ env.RESOURCE_GROUP }}
+          template: vivekkumarjaiswal-adf-dev/ARMTemplateForFactory.json
+          parameters: >
+            factoryName=${{ env.FACTORY_NAME }}
+            AzureDataLakeStorage1_properties_typeProperties_url=${{ vars.PROD_ADLS_URL }}
+            AzureDataLakeStorage1_accountKey=${{ secrets.PROD_ADLS_KEY }}
+
+      - name: Start All ADF Triggers
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            triggers=$(az datafactory trigger list \
+              --factory-name ${{ env.FACTORY_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --query "[?properties.runtimeState=='Stopped'].name" -o tsv)
+            
+            for trigger in $triggers; do
+              echo "Starting trigger: $trigger"
+              az datafactory trigger start \
+                --factory-name ${{ env.FACTORY_NAME }} \
+                --resource-group ${{ env.RESOURCE_GROUP }} \
+                --name $trigger
+            done
+        continue-on-error: true
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ ADF Deployment completed successfully!"
+          echo "Factory: ${{ env.FACTORY_NAME }}"
+          echo "Resource Group: ${{ env.RESOURCE_GROUP }}"
